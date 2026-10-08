@@ -1,0 +1,10 @@
+[Unit]
+Description=Таймер опроса статусов проектов пиров каждые 10 минут
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

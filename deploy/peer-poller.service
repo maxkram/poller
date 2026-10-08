@@ -1,0 +1,11 @@
+[Unit]
+Description=Опрос статусов проектов пиров (21-school API)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=HOME=/root
+WorkingDirectory=/opt/peer-poller
+ExecStart=/opt/peer-poller/peer_poller.sh --once
+TimeoutStartSec=300

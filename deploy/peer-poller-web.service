@@ -1,0 +1,12 @@
+[Unit]
+Description=Web UI для управления списком пиров (peer-poller)
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=PEER_POLLER_HOME=/opt/peer-poller WEB_PORT=8080
+ExecStart=/usr/bin/python3 /opt/peer-poller/peers_web.py
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

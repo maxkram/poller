@@ -1,0 +1,14 @@
+[Unit]
+Description=MTProto proxy for Telegram (alexbers/mtprotoproxy)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@PROXY_DIR@
+ExecStart=/usr/bin/python3 @PROXY_DIR@/mtprotoproxy.py @PROXY_DIR@/config.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
