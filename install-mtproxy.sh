@@ -27,21 +27,45 @@ PROXY_DIR="${PROXY_DIR:-/opt/mtproto-proxy}"
 TLS_DOMAIN="${TLS_DOMAIN:-www.google.com}"
 AD_TAG="${AD_TAG:-}"
 
-echo "== 1. Зависимости"
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq git python3 python3-uvloop python3-cryptography python3-socks \
-    ca-certificates xxd curl
-
-echo "== 2. Код прокси (alexbers/mtprotoproxy) в $PROXY_DIR"
-if [[ ! -d "$PROXY_DIR/.git" ]]; then
-    git clone -b stable https://github.com/alexbers/mtprotoproxy.git "$PROXY_DIR"
+# Определяем семейство ОС (Ubuntu/Debian vs Oracle Linux)
+if command -v dnf >/dev/null 2>&1; then
+    OS_FAMILY="oracle"
+    INSTALL="dnf install -y"
 else
-    ( cd "$PROXY_DIR" && git pull -q --ff-only )
+    OS_FAMILY="debian"
+    INSTALL="apt-get install -y -qq"
 fi
 
+echo "== 1. Зависимости (${OS_FAMILY})"
+export DEBIAN_FRONTEND=noninteractive
+if [[ "$OS_FAMILY" == "debian" ]]; then
+    apt-get update -qq
+fi
+# Минимальный набор: ставим только недостающее (экономия RAM на малых инстансах,
+# где dnf падает по OOM). git НЕ нужен — исходники берём tarball'ом (шаг 2).
+if ! command -v curl >/dev/null 2>&1; then
+    $INSTALL curl
+fi
+if ! python3 -c 'import cryptography' 2>/dev/null; then
+    $INSTALL python3-cryptography
+fi
+echo "   curl / python3 / cryptography готовы; опциональные (uvloop/socks) пропускаем"
+
+echo "== 2. Код прокси (alexbers/mtprotoproxy) в $PROXY_DIR"
+mkdir -p "$PROXY_DIR"
+TMP_TG="$(mktemp)"
+if curl -fsSL -o "$TMP_TG" https://github.com/alexbers/mtprotoproxy/archive/refs/heads/stable.tar.gz 2>/dev/null; then
+    echo "   загружен stable"
+else
+    curl -fsSL -o "$TMP_TG" https://github.com/alexbers/mtprotoproxy/archive/refs/heads/master.tar.gz
+    echo "   загружен master"
+fi
+tar xzf "$TMP_TG" -C "$PROXY_DIR" --strip-components=1
+rm -f "$TMP_TG"
+[ -f "$PROXY_DIR/mtprotoproxy.py" ] || { echo "не нашёл mtprotoproxy.py после загрузки" >&2; exit 1; }
+
 echo "== 3. config.py (порт $PORT, TLS-маскировка $TLS_DOMAIN)"
-SECRET="$(head -c 16 /dev/urandom | xxd -p -c 32)"
+SECRET="$(python3 -c 'import secrets;print(secrets.token_hex(16))')"
 {
     echo "PORT = $PORT"
     echo
@@ -71,14 +95,24 @@ chmod 644 /etc/systemd/system/mtproxy.service
 systemctl daemon-reload
 systemctl enable --now mtproxy.service
 
-echo "== 5. Ссылки для клиентов"
+echo "== 5. Открытие порта $PORT на хосте (firewalld для Oracle Linux)"
+if [[ "$OS_FAMILY" == "oracle" ]]; then
+    firewall-cmd --permanent --add-port="$PORT/tcp" --add-port="$PORT/udp"
+    firewall-cmd --reload
+    echo "   firewalld: открыты $PORT/tcp и $PORT/udp"
+else
+    echo "   Ubuntu: порты открываются в Security List Oracle (см. ниже)"
+fi
+
+echo "== 6. Ссылки для клиентов"
 sleep 3
 LINE="$(journalctl -u mtproxy -n 40 --no-pager 2>/dev/null | grep -o 'tg://proxy[^ ]*' | tail -n1 || true)"
 IP="$(curl -4 -s https://ifconfig.co 2>/dev/null || echo 'ВАШ_ПУБЛИЧНЫЙ_IP')"
 if [[ -n "$LINE" ]]; then
+    SECRET="${LINE##*&secret=}"
     echo "  tg://  $LINE"
-    echo "  web:   https://t.me/proxy?server=$IP&port=$PORT&secret=${LINE#tg://proxy?server=*&secret=}"
-    echo "         (если строка выше пустая — скопируйте secret из лога командой ниже)"
+    echo "  web:   https://t.me/proxy?server=$IP&port=$PORT&secret=$SECRET"
+    echo "         (кнопка в Telegram: 'Подключить прокси', либо просто открыть ссылку)"
 else
     echo "  ссылку читайте из лога:"
     echo "    journalctl -u mtproxy -n 50 --no-pager | grep -o 'tg://proxy[^ ]*'"
@@ -86,7 +120,8 @@ fi
 
 echo "=="
 echo "Готово. Дальше:"
-echo "  1) Oracle → Security List сервера: открыть порт $PORT (TCP и UDP) для 0.0.0.0/0"
+echo "  1) Oracle → Security List (вашего инстанса) открыть порт $PORT TCP и UDP для 0.0.0.0/0"
+echo "     (внешний вход; firewalld на хосте уже открыт скриптом)"
 echo "  2) Раздать ссылку (кнопка в клиенте Telegram: 'Подключить прокси')"
 echo "  3) Проверка: journalctl -u mtproxy -f"
 echo "  4) Смена секрета/ссылки: rm -f $PROXY_DIR/config.py && sudo bash $0"

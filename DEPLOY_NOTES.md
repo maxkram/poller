@@ -212,6 +212,93 @@ http://40.233.118.196:8080/p/3gnRN2Ws-ZttcOA5YZ68GQ
 > `ssh -N -L 127.0.0.1:8090:127.0.0.1:8080 -i ~/.ssh/peer-poller-vps ubuntu@40.233.118.196`
 > и откройте `http://127.0.0.1:8090/p/<токен>`.
 
+## MTProto-прокси для Telegram (alexbers/mtprotoproxy)
+
+Отдельный Oracle Always Free-инстанс для прокси-сервера Telegram (MTProto).
+Трафик идёт через proxy → Telegram не блокирует и не тормозит с прокси.
+Используется **отдельный** сервер, а не прод-поллер: IP прокси целят DPI и
+могут резать сеть — не тащим это на прод-сервер поллера.
+
+### ✅ РАЗВЕРНУТО (10.10.2026) — работает
+- Инстанс: `instance-20261008-1657`, Oracle Linux 9.8, E2.1.Micro, ca-toronto-1.
+  Публичный IP **`147.5.125.142`**, user `opc`, key `~/.ssh/proxy-mtproxy`.
+- Секрет (TLS-маска, префикс `ee` + hex-код домена):
+  `eefd2de510abe9c7040340256554000b1a7777772e676f6f676c652e636f6d`
+- Ссылки:
+  - `tg://proxy?server=147.5.125.142&port=8443&secret=eefd2de510abe9c7040340256554000b1a7777772e676f6f676c652e636f6d`
+  - `https://t.me/proxy?server=147.5.125.142&port=8443&secret=eefd2de510abe9c7040340256554000b1a7777772e676f6f676c652e636f6d`
+- Проверка извне (pollerVPS 40.233.118.196): 8443 TCP открыт, прокси отдаёт
+  сертификат Google (`subject=CN=www.google.com`, verify ok) → маскировка и
+  внешний доступ работают.
+- Доступ SSH: прямой `ssh opc@147.5.125.142` с домашней **вешается на banner**
+  (DPI-срез). Рабочий путь — через jump (см. «Установка» ниже).
+
+### Состав
+- `install-mtproxy.sh` — установка: зависимости, код в `/opt/mtproto-proxy`, `config.py`,
+  systemd-юнит, печать ссылок для клиентов.
+- `deploy/mtproxy.service` — systemd-юнит (Type=simple, Restart=on-failure).
+- `mtproxy-links.sh` — показать ссылку (`--regen` — сменить секрет и перезапустить).
+
+### Новый инстанс Oracle (Always Free, рекомендую)
+1. **Create VM instance** → Image: **Ubuntu 24.04** (проще) или **Oracle Linux 9**
+   (скрипт сам определяет ОС: Ubuntu→apt, Oracle Linux→dnf+firewalld) / Shape:
+   **E2.1.Micro** (1 vCPU; RAM формально 1 ГБ, реально доступно ~500 МБ — см. OOM ниже). Если нужен ARM — A1.Flex, но в AD-1
+   ca-toronto часто «Out of capacity» → E2.1.Micro.
+2. Включить чекбокс **Assign a public IPv4 address** (иначе после создания IP нет).
+3. **VCN → Subnet → Security List → Add Ingress Rules**:
+   - Source CIDR `0.0.0.0/0`, IP Protocol **TCP**, Destination port **8443**
+   - Source CIDR `0.0.0.0/0`, IP Protocol **UDP**, Destination port **8443** (опционально — alexbers/mtprotoproxy работает по TCP)
+   - (порт `22` TCP открыть для SSH, если закрыт)
+4. Добавить SSH-ключ (публичную часть `~/.ssh/proxy-mtproxy.pub` и т.п.).
+5. Дождаться Running и публичного IP.
+
+> Oracle Linux: `firewalld` открывает 8443 сам скрипт; у пользователя входа
+> username **`opc`**. Ubuntu: username **`ubuntu`**.
+
+### Установка (с домашней машины, скрипты копируются scp)
+```bash
+# Прямой SSH к прокси-инстансу с домашней сети часто вешает DPI (banner
+# зависает). Обойти: прыжок через pollerVPS (40.233.118.196, ubuntu@,
+# ключ ~/.ssh/peer-poller-vps). Ключ к самому прокси: ~/.ssh/proxy-mtproxy, user opc.
+J="-J ubuntu@40.233.118.196"
+# проверка доступа:
+ssh -i ~/.ssh/proxy-mtproxy $J opc@<IP-прокси> 'whoami'
+
+# 1) скопировать скрипты (с домашней, через jump):
+ssh -i ~/.ssh/proxy-mtproxy $J opc@<IP-прокси> 'mkdir -p /tmp/deploy'
+scp -i ~/.ssh/proxy-mtproxy $J /home/maxkram/poller/install-mtproxy.sh opc@<IP-прокси>:/tmp/install-mtproxy.sh
+scp -i ~/.ssh/proxy-mtproxy $J /home/maxkram/poller/deploy/mtproxy.service opc@<IP-прокси>:/tmp/deploy/mtproxy.service
+# (скрипт ищет юнит в $(dirname install)/deploy/mtproxy.service)
+# 2) установить:
+ssh -i ~/.ssh/proxy-mtproxy $J opc@<IP-прокси> 'sudo bash /tmp/install-mtproxy.sh'
+```
+Скрипт сам напечатает ссылки вида:
+```
+tg://  tg://proxy?server=<IP>&port=8443&secret=ee<32hex><hex(домен)>
+web:   https://t.me/proxy?server=<IP>&port=8443&secret=ee...
+```
+(хвост после 32 hex = hex-код TLS_DOMAIN, напр. `7777772e676f6f676c652e636f6d` = «www.google.com»)
+```
+Раздать ссылку — откройте её в Telegram (кнопка «Подключить прокси»).
+
+### Управление
+```bash
+sudo systemctl status mtproxy          # статус
+sudo journalctl -u mtproxy -f          # лог
+sudo bash /tmp/mtproxy-links.sh        # показать ссылку снова
+sudo bash /tmp/mtproxy-links.sh --regen # сменить секрет (пересоздать config.py) и перезапустить
+```
+
+### Настройки (переменные окружения для install-mtproxy.sh)
+- `PORT` — порт (TCP+UDP), по умолч. **8443**. Менять → не забыть открыть в Security List.
+- `TLS_DOMAIN` — домен для TLS-маскировки (проверяется при старте), по умолч. `www.google.com`.
+- `AD_TAG` — рекламный тег от **@MTProxybot** (необязательно).
+
+> Режим `tls` включён по умолчанию: alexbers/mtprotoproxy генерирует секрет с
+> префиксом **`ee`** + hex-код TLS-домена — устойчивый к DPI формат (fake-TLS:
+> «чужим» клиентам отдаётся настоящий сертификат маскируемого домена).
+> Классический `dd`-секрет (без маски) детектятся и режутся — его не используем.
+
 ---
 
 ## Типичные ошибки и решения
@@ -226,6 +313,8 @@ http://40.233.118.196:8080/p/3gnRN2Ws-ZttcOA5YZ68GQ
 | `Connection timed out` к api.telegram.org | региональные блокировки с домашней сети | запускать с сервера (`curl -sI https://api.telegram.org`) |
 | @userinfobot не отвечает | написали @userinfobot в чате **своего** бота | бот находится через глобальный поиск Telegram |
 | `Bad Request: can't parse entities: Unsupported start tag "br"` | в HTML parse_mode Telegram не поддерживает `<br>` | переводы строк — реальными `\n` в теле (fix от 05.10.2026), экранирование только `&< >` через escape_html |
+| `dnf ... Killed` (OOM) при установке на E2.1.Micro | реально ~500 МБ RAM + cgroup-лимит; dnf строит метаданные всех репо → OOM | git не ставить: скрипт берёт исходники tarball'ом (curl); ставит только реально недостающее (curl/python3/cryptography обычно уже есть) |
+| Прямой SSH `opc@<прокси>` вешается на banner (TCP 22 открыт) | DPI-срез с домашней сети | входить через jump: `ssh -J ubuntu@<pollerVPS> -i ~/.ssh/proxy-mtproxy opc@<прокси>` |
 
 ---
 
@@ -245,3 +334,25 @@ http://40.233.118.196:8080/p/3gnRN2Ws-ZttcOA5YZ68GQ
 9. Добавлены события `PEER_ADDED`/`PEER_REMOVED` (bootstrap новых пиров без NEW-флуда).
 10. В peers.txt добавлены `kelvinch`, `noahreyn` (всего 10) — при синке на сервер
     передаются вместе с обновлённым скриптом.
+
+## Журнал действий (MTProto-прокси)
+
+1. Подготовлены `install-mtproxy.sh` + `deploy/mtproxy.service` + `mtproxy-links.sh`
+   (официальный `alexbers/mtprotoproxy`, TLS-маскировка, порт 8443 TCP+UDP).
+2. (10.10.2026) Инстанс создан как **Oracle Linux 9.8** `instance-20261008-1657`,
+   IP **147.5.125.142** (E2.1.Micro). Скрипт: auto-detect ОС (dnf/firewalld/opc).
+3. Прямой SSH с домашней вешался на banner (DPI) → доступ через jump (pollerVPS,
+   ключ `~/.ssh/peer-poller-vps` + `~/.ssh/proxy-mtproxy`).
+4. `dnf` дважды падал по OOM (~500 МБ RAM, cgroup-лимит) при установке git.
+   Решено: **git не ставить**, исходники берём tarball'ом через curl
+   (curl/python3/cryptography уже были в ОС) → установка прошла без dnf.
+5. Прокси запущен (systemd `mtproxy`, active), firewalld открыл 8443 tcp+udp.
+   Секрет `ee...`, маска www.google.com. Проверка из pollerVPS: 8443 открыт,
+   отдаёт сертификат Google (verify ok) → маскировка и внешний доступ работают.
+6. alexbers/mtprotoproxy работает **только по TCP** (UDP в нём нет — проверено по
+   коду/README). Значит:
+   - в Security List обязателен **8443 TCP** (уже работает — подтверждён извне);
+   - **8443 UDP можно не открывать** (прокси его не использует, правило безвредно);
+   - осталось: открыть ссылку в Telegram-клиенте на мобильном и убедиться, что
+     через прокси заходят в Telegram.
+4. IP/порт/домен прокси и ссылка записаны ниже (TODO: вписать после развёртывания).
